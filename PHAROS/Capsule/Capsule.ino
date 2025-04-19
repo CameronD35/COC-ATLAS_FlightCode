@@ -1,7 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
-#include <Adafruit_BNO08x.h> // IMU
-#include "Adafruit_MPRLS.h" // Ported Pressure Sensor
+#include <Adafruit_BNO08x.h>
+#include "Adafruit_MPRLS.h"
 
 // Required for SPI but not I2C
 #define BNO08x_RESET -1
@@ -14,37 +14,37 @@ struct euler_t {
   float pitch;
   float roll;
 } ypr;
-
+static long last = 0;
 
 Adafruit_BNO08x bno08x(BNO08x_RESET);
 sh2_SensorValue_t sensorValue;
 sh2_SensorId_t reportType = SH2_ARVR_STABILIZED_RV;
 long reportIntervalUs = 5000; 
 
-// Used to tell the IMU library what type of reports are wanted.
-// According to documentation, this set is slower, but more accurate
 void setReports(sh2_SensorId_t reportType, long report_interval) {
+  Serial.println("Setting desired reports");
   if (! bno08x.enableReport(reportType, report_interval)) {
     Serial.println("Could not enable stabilized remote vector");
   }
 }
 
 void setup() {
+  // For the serial monitor
   Serial.begin(115200);
+  // For the RFD
+  Serial1.begin(57600);
 
   while (!Serial) delay(10);
 
-
-  // IMU set up
   if (!bno08x.begin_I2C()){
     Serial.println("Failed to find BNO08x sensor.");
     while (1) { delay(10); }
   }
 
   Serial.println("Found IMU");
+
   setReports(reportType, reportIntervalUs);
 
-  // Ported Pressure Sensor Set Up
   if (!mpr.begin()) {
     Serial.println("Failed to find MPRLS sensor.");
     while (1) { delay(10); }
@@ -53,10 +53,11 @@ void setup() {
   Serial.println("Found Pressure sensor");
 
   delay(100);
+  last = 0;
 }
 
-// Provided by the IMU library example
 void quaternionToEuler(float qr, float qi, float qj, float qk, euler_t* ypr, bool degrees = false) {
+
     float sqr = sq(qr);
     float sqi = sq(qi);
     float sqj = sq(qj);
@@ -80,6 +81,7 @@ void quaternionToEulerRV(sh2_RotationVectorWAcc_t* rotational_vector, euler_t* y
 
 void loop() {
   float pressure_hPa = mpr.readPressure();
+  Serial.println("Looping");
   
   if (bno08x.wasReset()){
     Serial.println("Sensor was reset");
@@ -89,12 +91,10 @@ void loop() {
 
     quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
   
-    static long last = 0;
+
     
     // Think of a better way to measure time elapsed maybe?
     long now = micros();
-    last = now;
-
     Serial.println("-----------------------------------");
     Serial.println("Time \t Yaw \t Pitch \t Roll \t Pressure (hPa)");
     Serial.print(now - last); Serial.print("\t"); 
@@ -103,7 +103,16 @@ void loop() {
     Serial.print(ypr.roll); Serial.print("\t");
     Serial.println(pressure_hPa);
 
-    }
+    String dataPacket = String("{'time': ") + (now - last) + ", 'yaw': " + ypr.yaw + ", 'pitch': " + ypr.pitch + ", 'roll': " + ypr.roll + ", 'pressure': " + pressure_hPa + "}";
+
+    last = now;
+
+    // Send data over RFD900x
+    Serial1.println(dataPacket);
+
+    // Debugging
+    Serial.println(dataPacket);
+ }
 
   delay(1000);
 }
