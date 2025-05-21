@@ -101,16 +101,16 @@ void loop() {
       }
       while (targetAngle != currAngle + errorMargin && targetAngle != currAngle - errorMargin) {
         if (currAngle < targetAngle) {
-          verticalAngle = verticalAngle + (targetAngle - currAngle);
+          verticalAngle = verticalAngle++;
         }
         else if (currAngle > targetAngle) {
-          verticalAngle = verticalAngle - (targetAngle - currAngle);
+          verticalAngle = verticalAngle--;
         }
         One.write(verticalAngle);
         delay(5);
         currAngle = int(i*100.00) + 90;
       }
-      
+
       Serial.print(" j: ");
       j = sensorValue.un.gameRotationVector.j;
       Serial.print(j);

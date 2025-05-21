@@ -1,9 +1,0 @@
-Welcome to the RSX 2025 programmer template guide!
-
-To use the template properly (and to keep things organized!) do the following:
-
-1) Make sure you have your own branch (preferably title it with your name).
-2) Copy this folder (titling it your name) and push it into your branch (not someone else's!).
-3) Place ALL of YOUR code inside of your folder and push to YOUR branch when ready.
-4) If you believe you are ready to merge your code into a higher branch, check in with the team leads.
-5) Thank you for your hard work!
