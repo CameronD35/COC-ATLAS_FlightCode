@@ -25,22 +25,19 @@ mv rsx_*.txt "$OUTDIR/metadata/" 2>/dev/null
 echo "Generating video for Depth"
 cd "$OUTDIR/depth_pngs" || exit 1
 if ls rsx_Depth*.png 1> /dev/null 2>&1; then
-  for f in rsx_Depth*.png; do echo "file '$f'"; done > depthList.txt
-  ffmpeg -f concat -safe 0 -i depthList.txt -r 30 -c:v libx264 -pix_fmt yuv420p ../RSXDepthOutput.mp4
+  ffmpeg -framerate 30 -pattern_type glob -i 'rsx_Depth_*.png' -c:v libx264 -pix_fmt yuv420p ../RSXDepthOutput.mp4
 fi
 
 echo "Generating videos for Colour"
 cd ../color_pngs || exit 1
 if ls rsx_Color*.png 1> /dev/null 2>&1; then
-  for f in rsx_Color*.png; do echo "file '$f'"; done > colorList.txt
-  ffmpeg -f concat -safe 0 -i colorList.txt -r 30 -c:v libx264 -pix_fmt yuv420p ../RSXColorOutput.mp4
+  ffmpeg -framerate 30 -pattern_type glob -i 'rsx_Color_*.png' -c:v libx264 -pix_fmt yuv420p ../RSXColorOutput.mp4
 fi
 
 echo "Generating videos for Infrared (if there are any)"
 cd ../infrared_pngs || exit 1
 if ls rsx_Infrared*.png 1> /dev/null 2>&1; then
-  for f in rsx_Infrared*.png; do echo "file '$f'"; done > infraredList.txt
-  ffmpeg -f concat -safe 0 -i infraredList.txt -r 30 -c:v libx264 -pix_fmt yuv420p ../RSXInfraredOutput.mp4
+  ffmpeg -framerate 30 -pattern_type glob -i 'rsx_Infrared_*.png' -c:v libx264 -pix_fmt yuv420p ../RSXInfraredOutput.mp4
 fi
 
 echo "Finished, sorted, and ready for your use in: $OUTDIR!"
