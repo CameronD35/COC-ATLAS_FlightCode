@@ -2,17 +2,32 @@
 #include <Adafruit_MCP9808.h>
 #include <Adafruit_BNO08x.h>
 #include "Adafruit_MPRLS.h"
+#include <IridiumSBD.h>
+#include <ArduinoJson.h>
 
-// Thank you for your recommendation, Owen!
-#define RFSerial Serial2 
+// MsgPack code from Owen! Thank you!!
+// SOURCE: https://github.com/MoonstoneStudios/MsgPackTestRSX/tree/main
+#include <MsgPack.h>
+
+// These aren't the final pins
+// Final will have RFSerial as Serial1
+//            and IridiumSerial as Serial2
+// Keeping these here to print and debug
+// #define RFSerial Serial2 
+#define IridiumSerial Serial3
 
 Adafruit_MCP9808 tempSensor = Adafruit_MCP9808();
 Adafruit_MPRLS mpr = Adafruit_MPRLS();
 Adafruit_BNO08x bno08x;
+IridiumSBD rockblock(IridiumSerial);
+StaticJsonDocument<200> json;
+
 
 sh2_SensorValue_t sensorValue;
 sh2_SensorId_t reportType = SH2_ARVR_STABILIZED_RV;
 long reportIntervalUs = 5000;
+int signalQuality = -1;
+int err;
 
 void setReports(sh2_SensorId_t reportType, long report_interval){
     if (! bno08x.enableReport(reportType, report_interval)) {
@@ -20,57 +35,32 @@ void setReports(sh2_SensorId_t reportType, long report_interval){
     }
 }
 
-struct euler_t {
-  float yaw;
-  float pitch;
-  float roll;
-} ypr;
-
-struct SensorData {
-    float tempF;
-    float pressure_hPa;
-    float yaw;
-    float pitch;
-    float roll;
-};
-
-void quaternionToEuler(float qr, float qi, float qj, float qk, euler_t* ypr, bool degrees = false) {
-
-    float sqr = sq(qr);
-    float sqi = sq(qi);
-    float sqj = sq(qj);
-    float sqk = sq(qk);
-
-    ypr->yaw = atan2(2.0 * (qi * qj + qk * qr), (sqi - sqj - sqk + sqr));
-    ypr->pitch = asin(-2.0 * (qi * qk - qj * qr) / (sqi + sqj + sqk + sqr));
-    ypr->roll = atan2(2.0 * (qj * qk + qi * qr), (-sqi - sqj + sqk + sqr));
-
-    if (degrees) {
-      ypr->yaw *= RAD_TO_DEG;
-      ypr->pitch *= RAD_TO_DEG;
-      ypr->roll *= RAD_TO_DEG;
-    }
-}
-
-void quaternionToEulerRV(sh2_RotationVectorWAcc_t* rotational_vector, euler_t* ypr, bool degrees = false) {
-    quaternionToEuler(rotational_vector->real, rotational_vector->i, rotational_vector->j, rotational_vector->k, ypr, degrees);
-}
-
 void setup() {
     Serial.begin(9600);
-    RFSerial.begin(57600);
+    // RFSerial.begin(57600);
+    IridiumSerial.begin(19200);
     
+    Serial.println("Starting RockBlock...");
+    err = rockblock.begin();
+
+    if (err != ISBD_SUCCESS) {
+      Serial.print("RockBlock failed: ");
+      Serial.println(err);
+
+      if (err == ISBD_NO_MODEM_DETECTED) {
+        Serial.println("Could not find RockBlock; check wiring or make sure flow control is off");
+      }
+
+      return;
+    }
+
     if (!tempSensor.begin(0x19)) {
         Serial.println("Failed to find Temperature Sensor");
-        //while (1);
     }
     Serial.println("Found Temp sensor");
     
     if (! mpr.begin()) {
         Serial.println("Failed to find Pressure Sensor");
-        while (1) {
-            delay(10);
-        }
     }
     Serial.println("Found Pressure sensor");
 
@@ -81,32 +71,69 @@ void setup() {
 
     setReports(reportType, reportIntervalUs);
 
-    delay(100);
+    delay(1000);
 }
 
 void loop() {
+    json.clear();
+
     if (bno08x.wasReset()) {
         Serial.println("Sensor was reset");
         setReports(reportType, reportIntervalUs);
     }
 
+    err = rockblock.getSignalQuality(signalQuality);
+
     if (bno08x.getSensorEvent(&sensorValue)){
-        quaternionToEulerRV(&sensorValue.un.arvrStabilizedRV, &ypr, true);
+        json["t"] = tempSensor.readTempF();
+        json["p"] = mpr.readPressure();
+        json["r"] = sensorValue.un.arvrStabilizedRV.real;
+        json["i"] = sensorValue.un.arvrStabilizedRV.i;
+        json["j"] = sensorValue.un.arvrStabilizedRV.j;
+        json["k"] = sensorValue.un.arvrStabilizedRV.k;
+        json["s"] = signalQuality;
+
+    String jsonStr;
+    int bytes = serializeJson(json, jsonStr);
+
+    Serial.println("\n----------------------");
+    Serial.print("JSON: ");
+    Serial.println(jsonStr);
+    Serial.print("BYTES: ");
+    Serial.println(bytes);
+
+    // DUCT TAPE FIX:
+    // MsgPack continues to fill buffer indefinitely and
+    // buffer().clear() is private
+    //
+    // I was too lazy to read documentation; will fix later
+    MsgPack::Packer packer;
+    packer.serialize(json);
+    
+    const uint8_t data = packer.data();
+    size_t dataSize = packer.size();
+
+    // NOTE: sendSBDBinary handles flush; no need to manually flush
+    int status = rockblock.sendSBDBinary(data, dataSize);
+    // RFSerial.write(data, dataSize);
+    // RFSerial.flush();
+
+    if (status == ISBD_SUCCESS) {
+      Serial.println("Sent data over RockBlock successfully");
+    } else {
+      Serial.print("RockBlock failed: ");
+      Serial.println(status);
     }
 
-    SensorData data = { tempSensor.readTempF(), mpr.readPressure(), ypr.yaw, ypr.pitch, ypr.roll};
-    RFSerial.write((uint8_t*)&data, sizeof(data));
-    // RFSerial.write("HULLO");
+    Serial.print("\n\nMSGPACK: ");
+    Serial.print("BYTES: ");
+    Serial.println(dataSize);
+    Serial.print("DATA: ");
 
-    Serial.println("----------------------");
-    Serial.print("Temperature: ");
-    Serial.print(data.tempF);
-    Serial.println(" °F");
-    Serial.print("Pressure: ");
-    Serial.println(data.pressure_hPa);
-    Serial.print(ypr.yaw);                Serial.print("\t");
-    Serial.print(ypr.pitch);              Serial.print("\t");
-    Serial.println(ypr.roll);
-    
-    delay(750);
+    for (unsigned int i = 0; i < packer.size(); i++) {
+      uint8_t hex = packer.data()[i];
+      Serial.print(hex, HEX);
+    }
+    }   
+    delay(500);
 }
