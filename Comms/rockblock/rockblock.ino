@@ -5,7 +5,7 @@
 IridiumSBD rockblock(IridiumSerial);
 int signalQuality;
 int err;
-const char* msg = "Added signal check and loop!";
+const char* msg = "Forgot to git pull whoops";
 
 void setup() {
   Serial.begin(96000);
