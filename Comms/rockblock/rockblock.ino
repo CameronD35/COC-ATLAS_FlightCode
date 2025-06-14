@@ -1,67 +1,49 @@
 #include <IridiumSBD.h>
 
-#define IridiumSerial Serial3
+#define IridiumSerial Serial1
 
 IridiumSBD rockblock(IridiumSerial);
+int signalQuality;
+int err;
+const char* msg = "Added signal check and loop!";
 
-void setup()
-{
-  int signalQuality = -1;
-  int err;
-  
+void setup() {
   Serial.begin(96000);
   IridiumSerial.begin(19200);
 
-  Serial.println("RockBlock Starting up...");
+  Serial.println("Rockblock starting up!");
+
   err = rockblock.begin();
+
   if (err != ISBD_SUCCESS) {
-    Serial.print("Rockblock failed:  ");
+    Serial.print("Rockblock failed: ");
     Serial.println(err);
-    if (err == ISBD_NO_MODEM_DETECTED) {
-      Serial.println("Could not find RockBlock; check wiring or make sure flow control is off");
+
+    while (1);
+  }
+
+  while (signalQuality < 1) {
+    err = rockblock.getSignalQuality(signalQuality);
+
+    if (err != ISBD_SUCCESS) {
+      Serial.print("Rockblock error: Couldn't report on signal quality");
+      Serial.println(err);
+    } else {
+      Serial.print("Signal quality: ");
+      Serial.println(signalQuality);
     }
-    return;
   }
+  Serial.println("Started up; prepping for AWS");
 
+  err = rockblock.sendSBDText(msg);
 
-  // Get Firmware Version
-  char version[12];
-  err = rockblock.getFirmwareVersion(version, sizeof(version));
   if (err != ISBD_SUCCESS) {
-     Serial.print("Couldn't get firmware version: ");
-     Serial.println(err);
-     return;
-  }
-  Serial.print("Firmware Version is ");
-  Serial.print(version);
-
-  // Get current signal quality
-  // Ranges between 0-5; you want more than 1
-  err = rockblock.getSignalQuality(signalQuality);
-  if (err != ISBD_SUCCESS) {
-    Serial.print("Failed to get signal quality: ");
-    Serial.println(err);
-    return;
-  }
-
-  Serial.print("Current scale is ");
-  Serial.println(signalQuality);
-  Serial.println("(You'll want 2 or higher).");
-
-  // Send the message
-  Serial.println("\n\nTrying to send the message. This might take a second.");
-  err = modem.sendSBDText("Sending over wires--THAT I CRIMPED");
-  
-  if (err != ISBD_SUCCESS) {
-    Serial.print("Failed to find Iridium Satellite: ");
-    Serial.println(err);
-    if (err == ISBD_SENDRECEIVE_TIMEOUT)
-      Serial.println("Timed out--try again; make sure patch antenna is facing the sky");
+    Serial.print("Rockblock failed: "); Serial.println(err);
   } else {
-    Serial.println("Message sent!");
+    Serial.print("Text sent over Rockblock!");
+    Serial.println("Check AWS!");
   }
 }
 
-void loop()
-{
+void loop() {
 }
