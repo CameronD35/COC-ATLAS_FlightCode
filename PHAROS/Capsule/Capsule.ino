@@ -1,24 +1,28 @@
 #include <Wire.h>
+
 #include <Adafruit_MCP9808.h>
 #include <Adafruit_BNO08x.h>
 #include "Adafruit_MPRLS.h"
-#include <IridiumSBD.h>
+
+#include <TeensyThreads.h>
 #include <ArduinoJson.h>
+#include <Servo.h>
+#include <IridiumSBD.h>
+#define DATA_BUFFER_SIZE 256
 
-// MsgPack code from Owen! Thank you!!
-// SOURCE: https://github.com/MoonstoneStudios/MsgPackTestRSX/tree/main
-#include <MsgPack.h>
+#define SERVO_PIN 22
+#define RFSerial Serial1
+#define IridiumSerial Serial2
 
-// These aren't the final pins
-// Final will have RFSerial as Serial1
-//            and IridiumSerial as Serial2
-// Keeping these here to print and debug
-// #define RFSerial Serial2 
-#define IridiumSerial Serial3
+bool PRINT_DATA = true;
+bool USE_RFD = true;
+bool USE_ROCKBLOCK = true;
+bool USE_SERVO = true;
 
+Servo pharosServo;
 Adafruit_MCP9808 tempSensor = Adafruit_MCP9808();
-Adafruit_MPRLS mpr = Adafruit_MPRLS();
-Adafruit_BNO08x bno08x;
+Adafruit_MPRLS pressureSensor = Adafruit_MPRLS();
+Adafruit_BNO08x imuSensor;
 IridiumSBD rockblock(IridiumSerial);
 StaticJsonDocument<200> json;
 
@@ -27,113 +31,171 @@ sh2_SensorValue_t sensorValue;
 sh2_SensorId_t reportType = SH2_ARVR_STABILIZED_RV;
 long reportIntervalUs = 5000;
 int signalQuality = -1;
-int err;
+int err; 
 
-void setReports(sh2_SensorId_t reportType, long report_interval){
-    if (! bno08x.enableReport(reportType, report_interval)) {
-        Serial.println("Could not enable stabilized remote vector");
+volatile uint8_t sharedData[DATA_BUFFER_SIZE];
+volatile size_t sharedDataLen = 0;
+Threads::Mutex dataMutex;
+volatile bool newDataAvailable = false;
+
+
+void setReports(sh2_SensorId_t reportType, long reportInterval) {
+  if (!imuSensor.enableReport(reportType, reportInterval)) {
+    Serial.println("IMU ERROR - Set reports failed");
+  }
+}
+
+void printReport() {
+  Serial.print("Temp (F): "); Serial.println(json["t"].as<float>());
+  Serial.print("Pressure: "); Serial.println(json["p"].as<float>());
+  Serial.print("R: "); Serial.println(json["r"].as<float>());
+  Serial.print("I: "); Serial.println(json["i"].as<float>());
+  Serial.print("J: "); Serial.println(json["j"].as<float>());
+  Serial.print("K: "); Serial.println(json["k"].as<float>());
+}
+
+void threadSensorAndRFD() {
+  while (true) {
+    json.clear();
+
+    if (imuSensor.getSensorEvent(&sensorValue)) {
+      json["t"] = tempSensor.readTempF();
+      json["p"] = pressureSensor.readPressure();
+      json["r"] = sensorValue.un.arvrStabilizedRV.real;
+      json["i"] = sensorValue.un.arvrStabilizedRV.i;
+      json["j"] = sensorValue.un.arvrStabilizedRV.j;
+      json["k"] = sensorValue.un.arvrStabilizedRV.k;
+      json["s"] = signalQuality;
+      
+      char jsonBuffer[DATA_BUFFER_SIZE];
+      size_t len = serializeJson(json, jsonBuffer, sizeof(jsonBuffer));
+
+
+      if (USE_RFD) {
+        // RFSerial.write((uint8_t*)jsonBuffer, len);
+        serializeJson(json, RFSerial);
+        RFSerial.write('\n');
+      }
+
+      dataMutex.lock();
+      memcpy((void*)sharedData, jsonBuffer, len);
+      sharedDataLen = len;
+      newDataAvailable = true;
+      dataMutex.unlock();
+
+      if (PRINT_DATA) {
+        Serial.println(jsonBuffer);
+      }
     }
+    
+    threads.delay(500);
+  }
+}
+
+void threadRockblock() {
+  // Once again, this is a thread
+  while (true) {
+    bool sendNow = false;
+    size_t len;
+    uint8_t buffer[DATA_BUFFER_SIZE];
+
+    dataMutex.lock();
+
+    if (newDataAvailable) {
+      len = sharedDataLen;
+      memcpy(buffer, (const void*)sharedData, len);
+      newDataAvailable = false;
+      sendNow = true;
+    }
+
+    dataMutex.unlock();
+
+    if (sendNow) {
+      signalQuality = -1;
+      err = rockblock.getSignalQuality(signalQuality);
+
+      // Rockblock check signal quality - only send when 1 or higher
+      if (signalQuality > 1 && err == ISBD_SUCCESS) {
+        err = rockblock.sendSBDBinary((const uint8_t*)buffer, len);
+
+        // Rockblock response send conditional-----------------
+        if (err == ISBD_SUCCESS) {
+          if (PRINT_DATA) Serial.println("Message sent! Check AWS!");
+        } else {
+          if (PRINT_DATA) Serial.print("Unable to send message: "); Serial.println(err);
+        } // End response send conditional---------------------
+      } else {
+        if (PRINT_DATA) Serial.println("RockBlock: No signal; Point patch antenna toward sky for better reception");
+      } // End signal quality check
+    } // End check for whether the signal should be sent
+    threads.delay(500); // Check every second; Rockblock takes a while to send
+  }
+}
+
+void moveCapsule(){
+  for (int i = 0; i <= 180; i++) {
+    pharosServo.write(i);
+    delay(15);
+  }
+
+  for (int i = 180; i >= 0; i--) {
+    pharosServo.write(i);
+    delay(15);
+  }
+}
+
+void threadMoveCapsule() {
+  // Final thread
+  while (true) {
+    moveCapsule();
+    threads.yield();
+  }
 }
 
 void setup() {
+  if (PRINT_DATA) {
     Serial.begin(9600);
-    // RFSerial.begin(57600);
+    Serial.print("Initializing serials, servo, and sensors");
+  }
+
+  if (USE_RFD) {
+    RFSerial.begin(57600);
+  }
+
+  if (USE_ROCKBLOCK) {
     IridiumSerial.begin(19200);
-    
-    Serial.println("Starting RockBlock...");
     err = rockblock.begin();
 
     if (err != ISBD_SUCCESS) {
-      Serial.print("RockBlock failed: ");
-      Serial.println(err);
-
-      if (err == ISBD_NO_MODEM_DETECTED) {
-        Serial.println("Could not find RockBlock; check wiring or make sure flow control is off");
+      if (PRINT_DATA) {
+        Serial.print("Rockblock failed: "); Serial.println(err);
       }
 
-      return;
+      USE_ROCKBLOCK = false;
     }
+  }
 
-    if (!tempSensor.begin(0x19)) {
-        Serial.println("Failed to find Temperature Sensor");
-    }
-    Serial.println("Found Temp sensor");
-    
-    if (! mpr.begin()) {
-        Serial.println("Failed to find Pressure Sensor");
-    }
-    Serial.println("Found Pressure sensor");
+  if (USE_SERVO) {
+    pharosServo.attach(SERVO_PIN);
+    // pharosServo.write();
+  }
+  
+  if (!tempSensor.begin(0x19) && PRINT_DATA) Serial.println("Failed to find Temperature Sensor");
 
-    if (!bno08x.begin_I2C()){
-        Serial.println("Failed to find IMU");
-    }
-    Serial.println("Found IMU");
+  if (!pressureSensor.begin() && PRINT_DATA) {
+    Serial.println("Failed to find Pressure Sensor");
+  } else {
+    Serial.println("Did find pressure sensor; that's not the problem.");
+  }
+  
+  if (!imuSensor.begin_I2C() && PRINT_DATA) Serial.println("Failed to find IMU");
 
-    setReports(reportType, reportIntervalUs);
+  setReports(reportType, reportIntervalUs);
 
-    delay(1000);
+  threads.addThread(threadMoveCapsule);
+  threads.addThread(threadSensorAndRFD);
+  threads.addThread(threadRockblock);
 }
 
 void loop() {
-    json.clear();
-
-    if (bno08x.wasReset()) {
-        Serial.println("Sensor was reset");
-        setReports(reportType, reportIntervalUs);
-    }
-
-    err = rockblock.getSignalQuality(signalQuality);
-
-    if (bno08x.getSensorEvent(&sensorValue)){
-        json["t"] = tempSensor.readTempF();
-        json["p"] = mpr.readPressure();
-        json["r"] = sensorValue.un.arvrStabilizedRV.real;
-        json["i"] = sensorValue.un.arvrStabilizedRV.i;
-        json["j"] = sensorValue.un.arvrStabilizedRV.j;
-        json["k"] = sensorValue.un.arvrStabilizedRV.k;
-        json["s"] = signalQuality;
-
-    String jsonStr;
-    int bytes = serializeJson(json, jsonStr);
-
-    Serial.println("\n----------------------");
-    Serial.print("JSON: ");
-    Serial.println(jsonStr);
-    Serial.print("BYTES: ");
-    Serial.println(bytes);
-
-    // DUCT TAPE FIX:
-    // MsgPack continues to fill buffer indefinitely and
-    // buffer().clear() is private
-    //
-    // I was too lazy to read documentation; will fix later
-    MsgPack::Packer packer;
-    packer.serialize(json);
-    
-    const uint8_t data = packer.data();
-    size_t dataSize = packer.size();
-
-    // NOTE: sendSBDBinary handles flush; no need to manually flush
-    int status = rockblock.sendSBDBinary(data, dataSize);
-    // RFSerial.write(data, dataSize);
-    // RFSerial.flush();
-
-    if (status == ISBD_SUCCESS) {
-      Serial.println("Sent data over RockBlock successfully");
-    } else {
-      Serial.print("RockBlock failed: ");
-      Serial.println(status);
-    }
-
-    Serial.print("\n\nMSGPACK: ");
-    Serial.print("BYTES: ");
-    Serial.println(dataSize);
-    Serial.print("DATA: ");
-
-    for (unsigned int i = 0; i < packer.size(); i++) {
-      uint8_t hex = packer.data()[i];
-      Serial.print(hex, HEX);
-    }
-    }   
-    delay(500);
 }
