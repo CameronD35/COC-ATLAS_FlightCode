@@ -115,6 +115,7 @@ void threadRockblock() {
 
       // Rockblock check signal quality - only send when 1 or higher
       if (signalQuality > 1 && err == ISBD_SUCCESS) {
+        Serial.println("RockBlock signal greater than 1; trying to send; might take a sec.");
         err = rockblock.sendSBDBinary((const uint8_t*)buffer, len);
 
         // Rockblock response send conditional-----------------
