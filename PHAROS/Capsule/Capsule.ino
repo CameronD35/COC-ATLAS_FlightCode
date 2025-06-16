@@ -6,6 +6,7 @@
 
 #include <TeensyThreads.h>
 #include <ArduinoJson.h>
+#include <MsgPack.h>
 #include <Servo.h>
 #include <IridiumSBD.h>
 #define DATA_BUFFER_SIZE 256
@@ -24,8 +25,6 @@ Adafruit_MCP9808 tempSensor = Adafruit_MCP9808();
 Adafruit_MPRLS pressureSensor = Adafruit_MPRLS();
 Adafruit_BNO08x imuSensor;
 IridiumSBD rockblock(IridiumSerial);
-StaticJsonDocument<200> json;
-
 
 sh2_SensorValue_t sensorValue;
 sh2_SensorId_t reportType = SH2_ARVR_STABILIZED_RV;
@@ -45,46 +44,46 @@ void setReports(sh2_SensorId_t reportType, long reportInterval) {
   }
 }
 
-void printReport() {
-  Serial.print("Temp (F): "); Serial.println(json["t"].as<float>());
-  Serial.print("Pressure: "); Serial.println(json["p"].as<float>());
-  Serial.print("R: "); Serial.println(json["r"].as<float>());
-  Serial.print("I: "); Serial.println(json["i"].as<float>());
-  Serial.print("J: "); Serial.println(json["j"].as<float>());
-  Serial.print("K: "); Serial.println(json["k"].as<float>());
-}
-
 void threadSensorAndRFD() {
   while (true) {
-    json.clear();
-
     if (imuSensor.getSensorEvent(&sensorValue)) {
-      json["t"] = tempSensor.readTempF();
-      json["p"] = pressureSensor.readPressure();
-      json["r"] = sensorValue.un.arvrStabilizedRV.real;
-      json["i"] = sensorValue.un.arvrStabilizedRV.i;
-      json["j"] = sensorValue.un.arvrStabilizedRV.j;
-      json["k"] = sensorValue.un.arvrStabilizedRV.k;
-      json["s"] = signalQuality;
       
-      char jsonBuffer[DATA_BUFFER_SIZE];
-      size_t len = serializeJson(json, jsonBuffer, sizeof(jsonBuffer));
-
+      MsgPack::map_t<const char*, float> sensorData = {
+        { "t", tempSensor.readTempF() },
+        { "p", pressureSensor.readPressure() },
+        { "r", sensorValue.un.arvrStabilizedRV.real },
+        { "i", sensorValue.un.arvrStabilizedRV.i },
+        { "j", sensorValue.un.arvrStabilizedRV.j },
+        { "k", sensorValue.un.arvrStabilizedRV.k },
+        { "s", (float)signalQuality },
+        { "ts", (uint32_t)millis() }
+      };
+      
+      MsgPack::Packer packer;
+      packer.serialize(sensorData);
+      const uint8_t* msgpackBuffer = packer.data();
+      size_t len = packer.size();
 
       if (USE_RFD) {
-        // RFSerial.write((uint8_t*)jsonBuffer, len);
-        serializeJson(json, RFSerial);
-        RFSerial.write('\n');
+        uint16_t protocol_len = packer.size();
+        RFSerial.write((uint8_t*)&len, 2);
+        RFSerial.write(msgpackBuffer, len);
       }
 
       dataMutex.lock();
-      memcpy((void*)sharedData, jsonBuffer, len);
+      memcpy((void*)sharedData, msgpackBuffer, len);
       sharedDataLen = len;
       newDataAvailable = true;
       dataMutex.unlock();
 
       if (PRINT_DATA) {
-        Serial.println(jsonBuffer);
+        Serial.print("MsgPack:");
+
+        for (size_t i = 0; i < len; i++) {
+          Serial.print(msgpackBuffer[i], HEX); Serial.print(" ");
+        }
+
+        Serial.println();
       }
     }
     
