@@ -9,9 +9,12 @@ uint8_t msgpackBuffer[DATA_BUFFER_SIZE];
 size_t bufferIndex = 0;
 uint16_t expectedLen = 0;
 
+// Used for sanity check later on; ensures that the transmitter and receiver are not out of sync
+// and sending messages that are cutting off in the wrong places
 unsigned long lastByteTime = 0;
 const unsigned long MSG_TIMEOUT_MS = 500;
 
+// writeToSD() : Takes in the received message in JSON format and appends it to the pharosData.jsonl file
 void writeToSD(const StaticJsonDocument<256>& doc) {
   File logFile = SD.open("pharosData.jsonl", FILE_WRITE);
 
@@ -41,6 +44,7 @@ void setup() {
 }
 
 void loop() {
+  // Uses length prefix to prevent partial data receiving 
   if (expectedLen == 0 && RFSerial.available() >= 2) {
     expectedLen = RFSerial.read();
     expectedLen |= (RFSerial.read() << 8);
@@ -48,6 +52,7 @@ void loop() {
     lastByteTime = millis();
   }
 
+  // Prevents overflow
   if (expectedLen > DATA_BUFFER_SIZE) {
     Serial.println("Message exceeds buffer size; resetting");
     expectedLen = 0;
@@ -55,11 +60,13 @@ void loop() {
     return;
   }
 
+  // Reads in data if there's a message available
   while (expectedLen > 0 && RFSerial.available() && bufferIndex < expectedLen && bufferIndex < DATA_BUFFER_SIZE) {
     msgpackBuffer[bufferIndex++] = RFSerial.read();
     lastByteTime = millis();
   }
 
+  // If there is a message and it' sin the buffer, we deserialize it, display it, and write it to the SD card
   if (expectedLen > 0 && bufferIndex == expectedLen) {
     StaticJsonDocument<256> json;
     DeserializationError err = deserializeMsgPack(json, msgpackBuffer, bufferIndex);
@@ -75,6 +82,7 @@ void loop() {
       uint32_t timeSent = json["ts"];
 
 
+      // Printing for debugging reasons; feel free to delete
       Serial.print("Temperature (F): "); Serial.println(tempF);
       Serial.print("Pressure (hPa): "); Serial.println(pressHPa);
       Serial.print("IMU: [ "); Serial.print(imuR); Serial.print(", "); Serial.print(imuI); Serial.print(", "); Serial.print(imuJ); Serial.print(", "); Serial.print(imuK); Serial.println(" ]");
@@ -85,8 +93,12 @@ void loop() {
 
       serializeJsonPretty(json, Serial);
       Serial.println();
+
+
       writeToSD(json);
     } else {
+      // If there is something in the buffer but it's the wrong length, we look at it to see what went wrong
+      // This is just a debugging thing; feel free to erase.
       Serial.print("Deserialization error: "); Serial.println(err.c_str());
       Serial.print("Raw buffer: ");
 
@@ -96,6 +108,8 @@ void loop() {
       
       Serial.println();
     }
+
+    // Resets the buffer for the next message.
     expectedLen = 0;
     bufferIndex = 0;
   }
@@ -111,5 +125,6 @@ void loop() {
     bufferIndex = 0;
   }
 
+  // Set to check for messages at a much quicker speed than the capsule is sent to send them
   delay(10);
 }
