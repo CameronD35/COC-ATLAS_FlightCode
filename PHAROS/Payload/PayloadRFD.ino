@@ -1,11 +1,18 @@
 #include <SD.h>
+#include <MsgPack.h>
 #include <ArduinoJson.h>
 
 #define RFSerial Serial1 
+#define DATA_BUFFER_SIZE 256
 
-String inputBuffer;
+uint8_t msgpackBuffer[DATA_BUFFER_SIZE];
+size_t bufferIndex = 0;
+uint16_t expectedLen = 0;
 
-void writeToSD(const JsonDocument& doc) {
+unsigned long lastByteTime = 0;
+const unsigned long MSG_TIMEOUT_MS = 500;
+
+void writeToSD(const StaticJsonDocument<256>& doc) {
   File logFile = SD.open("pharosData.jsonl", FILE_WRITE);
 
   if (logFile) {
@@ -34,45 +41,75 @@ void setup() {
 }
 
 void loop() {
-  while (RFSerial.available()) {
-    char c = RFSerial.read();
-    if (c == '\n') {
-      inputBuffer.trim();
-
-      if (inputBuffer.length() > 0) {
-        StaticJsonDocument<256> json;
-        DeserializationError err = deserializeJson(json, inputBuffer);
-
-        if (!err) {
-          float tempF = json["t"];
-          float pressHPa = json["p"];
-          float imuR = json["r"];
-          float imuI = json["i"];
-          float imuJ = json["j"];
-          float imuK = json["k"];
-          float rockblockSignalQuality = json["s"];
-
-          Serial.print("Temperature (F): "); Serial.println(tempF);
-          Serial.print("Pressure (hPa): "); Serial.println(pressHPa);
-          Serial.print("IMU: ["); Serial.print(imuR); Serial.print(imuI); Serial.print(imuJ); Serial.print(imuK);
-          Serial.print("SignalQuality: "); Serial.print(rockblockSignalQuality);
-
-          Serial.println("-----------------------------------------");
-
-          serializeJsonPretty(json, Serial);
-          Serial.println();
-          writeToSD(json);
-        } else {
-          Serial.print("Deserialization error: "); Serial.println(err.c_str());
-          Serial.print("Raw buffer: "); Serial.println(inputBuffer);
-        }
-      }
-      inputBuffer = "";
-  } else {
-    inputBuffer += c;
-    if (inputBuffer.length() > 256) inputBuffer = "";
+  if (expectedLen == 0 && RFSerial.available() >= 2) {
+    expectedLen = RFSerial.read();
+    expectedLen |= (RFSerial.read() << 8);
+    bufferIndex = 0;
+    lastByteTime = millis();
   }
-}
-  
+
+  if (expectedLen > DATA_BUFFER_SIZE) {
+    Serial.println("Message exceeds buffer size; resetting");
+    expectedLen = 0;
+    bufferIndex = 0;
+    return;
+  }
+
+  while (expectedLen > 0 && RFSerial.available() && bufferIndex < expectedLen && bufferIndex < DATA_BUFFER_SIZE) {
+    msgpackBuffer[bufferIndex++] = RFSerial.read();
+    lastByteTime = millis();
+  }
+
+  if (expectedLen > 0 && bufferIndex == expectedLen) {
+    StaticJsonDocument<256> json;
+    DeserializationError err = deserializeMsgPack(json, msgpackBuffer, bufferIndex);
+
+    if (!err) {
+      float tempF = json["t"];
+      float pressHPa = json["p"];
+      float imuR = json["r"];
+      float imuI = json["i"];
+      float imuJ = json["j"];
+      float imuK = json["k"];
+      float rockblockSignalQuality = json["s"];
+      uint32_t timeSent = json["ts"];
+
+
+      Serial.print("Temperature (F): "); Serial.println(tempF);
+      Serial.print("Pressure (hPa): "); Serial.println(pressHPa);
+      Serial.print("IMU: [ "); Serial.print(imuR); Serial.print(", "); Serial.print(imuI); Serial.print(", "); Serial.print(imuJ); Serial.print(", "); Serial.print(imuK); Serial.println(" ]");
+      Serial.print("SignalQuality: "); Serial.println(rockblockSignalQuality);
+      Serial.print("Time sent: "); Serial.println(timeSent);
+
+      Serial.println("-----------------------------------------");
+
+      serializeJsonPretty(json, Serial);
+      Serial.println();
+      writeToSD(json);
+    } else {
+      Serial.print("Deserialization error: "); Serial.println(err.c_str());
+      Serial.print("Raw buffer: ");
+
+      for (size_t i =0; i < bufferIndex; i++) {
+        Serial.print(msgpackBuffer[i], HEX); Serial.print(" ");
+      }
+      
+      Serial.println();
+    }
+    expectedLen = 0;
+    bufferIndex = 0;
+  }
+
+  /*
+  SANITY CHECK - If the transmit and receive are out of sync, the receiver may start and end
+  in the wrong place. This code double-checks to see if it's been receiving data for a long time
+  without finding an end; if this is the case, it drops everything and restarts.
+  */
+  if (expectedLen > 0 && (millis() - lastByteTime > MSG_TIMEOUT_MS)) {
+    Serial.println("Message receive timeout/reset!");
+    expectedLen = 0;
+    bufferIndex = 0;
+  }
+
   delay(10);
 }
